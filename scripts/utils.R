@@ -6,6 +6,31 @@ library(dplyr)
 library(ComplexHeatmap)
 library(circlize)  # for colorRamp2
 
+read_config <- function(config_path, required_fields = NULL) {
+  if (!file.exists(config_path)) {
+    stop("Config file not found: ", config_path)
+  }
+  config <- read.table(config_path,
+                        sep = "=",
+                        header = FALSE,
+                        row.names = 1,
+                        strip.white = TRUE,
+                        stringsAsFactors = FALSE,
+                        quote = "\"",
+                        comment.char = "#")
+  config_list <- as.list(config$V2)
+  names(config_list) <- rownames(config)
+
+  if (!is.null(required_fields)) {
+    missing_fields <- required_fields[!required_fields %in% names(config_list)]
+    if (length(missing_fields) > 0) {
+      stop("Missing required fields in config file: ",
+           paste(missing_fields, collapse = ", "))
+    }
+  }
+  return(config_list)
+}
+
 summarize_quality_by_position <- function(fastq_files, output_csv = "combined_quality_summary.csv") {
   quality_list <- list()
   

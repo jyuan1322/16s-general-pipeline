@@ -1,58 +1,67 @@
+#!/usr/bin/env Rscript
+# dada2_additional_figures.R
+#
+# Supplementary QC plots: read counts through the pipeline, and quality
+# scores across read cycles. Paths come from a config .ini file; sample
+# order and QC thresholds come from a per-study R file referenced inside
+# that config (see study_params_template.R).
+#
+# Usage: Rscript dada2_additional_figures.R <path_to_config_file>
+
 library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(viridis)
 library(stringr)
 
-df <- read.table("/data/local/jy1008/project_folder/test_data_output/dada2_stats.tsv", header = TRUE, sep = "\t")
-df$sample_name = rownames(df)
+source("utils.R")  # provides read_config()
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) != 1) {
+  stop("Usage: Rscript dada2_additional_figures.R <path_to_config_file>")
+}
+
+config <- read_config(args[1], required_fields = c(
+  "data_output_dir", "figure_output_dir", "study_params"
+))
+
+dada2_data_out <- config$data_output_dir
+dada2_figure_out <- config$figure_output_dir
+dir.create(dada2_figure_out, recursive = TRUE, showWarnings = FALSE)
+
+# Per-study parameters: sample_order, read_count_threshold, quality_score_threshold
+source(config$study_params)
+
+df <- read.table(file.path(dada2_data_out, "dada2_stats.tsv"), header = TRUE, sep = "\t")
+df$sample_name <- rownames(df)
 
 # bar plot with more metrics
-# Pivot longer: convert counts into "metric"/"value"
 df_long <- df %>%
   pivot_longer(
-    cols = c(input, filtered, merged, nonchim), 
-    names_to = "metric", 
+    cols = c(input, filtered, merged, nonchim),
+    names_to = "metric",
     values_to = "count"
   )
 
-# Make sure df_long$metric is ordered
 df_long$metric <- factor(
   df_long$metric,
   levels = c("input", "filtered", "merged", "nonchim")
 )
 
-sample_order <- c(
-  "Control1", "Control2", "Control3", "Control4", "Control5",
-  "ASS1", "ASS3", "ASS4",
-  "DOMP4", "DOMP5",
-  "GLP11", "GLP12", "GLP12filtered", "GLP13", "GLP14",
-  "ASSDOMP1", "ASSDOMP2", "ASSDOMP3", "ASSDOMP4", "ASSDOMP5",
-  "GLP1ASS1", "GLP1ASS2", "GLP1ASS2filtered", "GLP1ASS3", "GLP1ASS4", "GLP1ASS5",
-  "GLPDOMP1", "GLPDOMP2", "GLP1DOMP3", "GLP1DOMP4", "GLP1DOMP5",
-  "GLPASSDOMP2", "GLPASSDOMP3"
-)
-
-# Order samples by subject, then time
-# df_long <- df_long %>%
-  # Extract leading number as numeric
-  # mutate(sample_num = as.numeric(str_extract(sample_name, "^\\d+"))) %>%
-  # Arrange by that number
-#   arrange(sample_order)
+# Order samples by the order given in study_params.R
 df_long <- df_long %>%
-  arrange(factor(sample_name, levels = sample_order))
-df_long <- df_long %>%
+  arrange(factor(sample_name, levels = sample_order)) %>%
   mutate(sample_name = factor(sample_name, levels = unique(sample_name)))
 
 # Stacked bar plot
 p <- ggplot(df_long, aes(x = sample_name, y = count, fill = metric)) +
   geom_col(position = "identity", alpha = 1.0) +
-  geom_hline(yintercept = 30000, color = "red", linetype = "dashed", size = 1) +
+  geom_hline(yintercept = read_count_threshold, color = "red", linetype = "dashed", size = 1) +
   theme_bw() +
   labs(x = "Sample", y = "Read Count", fill = "Processing Step") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-ggsave("dada2_filtering_read_count_bars.pdf", plot = p, width = 12, height = 4)
+ggsave(file.path(dada2_figure_out, "dada2_filtering_read_count_bars.pdf"), plot = p, width = 12, height = 4)
 
 # only show input and nonchim
 df_long_filtered <- df_long %>%
@@ -60,22 +69,20 @@ df_long_filtered <- df_long %>%
 df_long_filtered$metric_label <- ifelse(df_long_filtered$metric == "input", "Input Reads", "post-QC Reads")
 p2 <- ggplot(df_long_filtered, aes(x = sample_name, y = count, fill = metric_label)) +
   geom_col(position = "identity", alpha = 1.0) +
-  geom_hline(yintercept = 30000, color = "red", linetype = "dashed", size = 1) +
+  geom_hline(yintercept = read_count_threshold, color = "red", linetype = "dashed", size = 1) +
   theme_bw() +
   labs(x = "Sample", y = "Read Count", fill = "Processing Step") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
-ggsave("dada2_filtering_read_count_bars_v2.pdf", plot = p2, width = 12, height = 4)
+ggsave(file.path(dada2_figure_out, "dada2_filtering_read_count_bars_v2.pdf"), plot = p2, width = 12, height = 4)
 
-
-
-qc_df <- read.csv("/data/local/jy1008/project_folder/test_data_output/read_quality_summary.csv",
+qc_df <- read.csv(file.path(dada2_data_out, "read_quality_summary.csv"),
                   header = TRUE, stringsAsFactors = FALSE)
 p <- ggplot(qc_df, aes(x = Cycle)) +
-  geom_line(aes(y = Mean_All), color = "blue", size = 1) +                # mean line
-  geom_ribbon(aes(ymin = Mean_All - SD_All, ymax = Mean_All + SD_All),   # shaded area
+  geom_line(aes(y = Mean_All), color = "blue", size = 1) +
+  geom_ribbon(aes(ymin = Mean_All - SD_All, ymax = Mean_All + SD_All),
               fill = "blue", alpha = 0.2) +
-  geom_hline(yintercept = 30, color = "red", linetype = "dashed", size = 1) +
+  geom_hline(yintercept = quality_score_threshold, color = "red", linetype = "dashed", size = 1) +
   theme_bw() +
-  expand_limits(y = 20) +  # force y-axis to start at 0
-  labs(x = "Cycle", y = "Quality Score", title = "Mean Quality ± SD Across Cycles")
-ggsave("dada2_read_quality_across_cycles.pdf", plot = p, width = 6, height = 4)
+  expand_limits(y = 20) +
+  labs(x = "Cycle", y = "Quality Score", title = "Mean Quality \u00b1 SD Across Cycles")
+ggsave(file.path(dada2_figure_out, "dada2_read_quality_across_cycles.pdf"), plot = p, width = 6, height = 4)
