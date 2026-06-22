@@ -29,7 +29,7 @@ source("utils.R")  # also provides read_config()
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 1) {
-  stop("Usage: Rscript fig2_asv_heatmap.R <path_to_config_file>")
+  stop("Usage: Rscript dada2_downstream_analysis.R <path_to_config_file>")
 }
 
 config <- read_config(args[1], required_fields = c(
