@@ -4,6 +4,7 @@
 
 # NOTE: compare to:
 # https://github.com/gerberlab/cdiff_paper_analyses/blob/master/scripts/dada2/dada2.R
+# Big-data adaptation reference: https://benjjneb.github.io/dada2/bigdata_paired.html
 
 # Load required libraries
 library(dada2)
@@ -89,6 +90,8 @@ qtable <- summarize_quality_by_position(fastq_files, output_csv = file.path(conf
 # Filter and trim
 filtFs <- file.path(config$data_path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
 filtRs <- file.path(config$data_path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
 
 print("Filtering and trimming reads")
 out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs,
@@ -101,9 +104,12 @@ out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs,
 write.csv(out, file.path(config$data_output_dir, "filterAndTrim_summary.csv"))
 
 # Learn error rates
+# nbases is capped at 2e8: error learning does not require the full dataset,
+# DADA2's own big-data workflow notes ~1e6-5e6 reads is generally sufficient,
+# so this just bounds the cost without sacrificing model quality.
 print("Learning error rates")
-errF <- learnErrors(filtFs, multithread=TRUE)
-errR <- learnErrors(filtRs, multithread=TRUE)
+errF <- learnErrors(filtFs, nbases=2e8, multithread=TRUE)
+errR <- learnErrors(filtRs, nbases=2e8, multithread=TRUE)
 
 # Save error plots
 pdf(file.path(config$figure_output_dir, "error_plots.pdf"))
@@ -111,22 +117,46 @@ plotErrors(errF, nominalQ=TRUE)
 plotErrors(errR, nominalQ=TRUE)
 dev.off()
 
-# Dereplicate
-derepFs <- derepFastq(filtFs, verbose=TRUE)
-derepRs <- derepFastq(filtRs, verbose=TRUE)
-names(derepFs) <- sample.names
-names(derepRs) <- sample.names
+# Denoise + merge, streamed one sample at a time.
+# This keeps memory flat regardless of sample count: each iteration loads only
+# that sample's dereplicated reads, runs dada() on it, merges, then discards
+# the heavy intermediate objects (derep + dada-class) before moving on.
+# This produces identical results to passing all samples to derepFastq/dada at
+# once, since dada()'s default pool=FALSE already processes samples
+# independently -- the loop changes memory footprint, not the algorithm.
+print("Denoising and merging (streamed per-sample)")
 
-# Denoise
-dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
-dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+mergers <- vector("list", length(sample.names))
+names(mergers) <- sample.names
 
-# Merge pairs
-mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+denoisedF_n <- numeric(length(sample.names))
+denoisedR_n <- numeric(length(sample.names))
+names(denoisedF_n) <- sample.names
+names(denoisedR_n) <- sample.names
+
+for (sam in sample.names) {
+  cat("Processing sample:", sam, "\n")
+
+  derepF <- derepFastq(filtFs[[sam]])
+  ddF <- dada(derepF, err=errF, multithread=TRUE)
+  denoisedF_n[sam] <- sum(getUniques(ddF))
+
+  derepR <- derepFastq(filtRs[[sam]])
+  ddR <- dada(derepR, err=errR, multithread=TRUE)
+  denoisedR_n[sam] <- sum(getUniques(ddR))
+
+  mergers[[sam]] <- mergePairs(ddF, derepF, ddR, derepR, verbose=TRUE)
+
+  rm(derepF, derepR, ddF, ddR)
+}
 
 # Make sequence table and remove chimeras
+# method="consensus" checks each sample independently then takes a majority
+# vote across samples -- this scales better than "pooled" (which pools
+# abundances across all samples before checking) and is less sensitive to any
+# single noisy/high-chimera sample skewing the result.
 seqtab <- makeSequenceTable(mergers)
-seqtab.nochim <- removeBimeraDenovo(seqtab, method="pooled", multithread=TRUE, verbose=TRUE)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
 
 # Calculate chimera removal statistics
 chimera_stats <- sum(seqtab.nochim)/sum(seqtab)
@@ -136,8 +166,8 @@ write.table(chimera_stats,
 # Track reads through pipeline
 getN <- function(x) sum(getUniques(x))
 track <- cbind(out,
-              sapply(dadaFs, getN),
-              sapply(dadaRs, getN),
+              denoisedF_n[sample.names],
+              denoisedR_n[sample.names],
               sapply(mergers, getN),
               rowSums(seqtab.nochim))
 colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
