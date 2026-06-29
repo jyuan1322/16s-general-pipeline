@@ -33,14 +33,24 @@ read_config <- function(config_path, required_fields = NULL) {
 
 summarize_quality_by_position <- function(fastq_files, output_csv = "combined_quality_summary.csv") {
   quality_list <- list()
-  
+  n_reads_list <- list()
+
   for (fq in fastq_files) {
     cat("Processing:", fq, "\n")
-    
+
     fq_reads <- readFastq(fq)
 
     qs_matrix <- as(quality(fq_reads), "matrix")
-    mean_q <- colMeans(qs_matrix)
+
+    # na.rm=TRUE: reads shorter than the max length in this file are padded
+    # with NA past their actual length. Without na.rm, a single short read
+    # at a given position NAs out the entire column mean for that sample.
+    mean_q <- colMeans(qs_matrix, na.rm = TRUE)
+
+    # Track how many reads actually had a base at each position, so a mean
+    # computed from a handful of surviving long reads isn't mistaken for a
+    # well-supported value.
+    n_at_pos <- colSums(!is.na(qs_matrix))
 
     # Clean base name
     fq_base <- tools::file_path_sans_ext(basename(fq))
@@ -49,6 +59,7 @@ summarize_quality_by_position <- function(fastq_files, output_csv = "combined_qu
     fq_base <- sub("\\.gz$", "", fq_base)
 
     quality_list[[fq_base]] <- round(mean_q, 2)
+    n_reads_list[[fq_base]] <- n_at_pos
   }
 
   # Combine into data frame
@@ -56,15 +67,26 @@ summarize_quality_by_position <- function(fastq_files, output_csv = "combined_qu
   quality_df$Cycle <- seq_len(nrow(quality_df))
   quality_df <- quality_df[, c("Cycle", setdiff(names(quality_df), "Cycle"))]
 
-  # Mean and standard deviation across samples
+  # Mean and standard deviation across samples (na.rm here too, in case a
+  # sample's max read length is shorter than another sample's, which produces
+  # genuine structural NAs in quality_df itself, not just qs_matrix)
   quality_matrix <- as.matrix(quality_df[, -1])
-  quality_df$Mean_All <- round(rowMeans(quality_matrix), 2)
-  quality_df$SD_All <- round(apply(quality_matrix, 1, sd), 2)
+  quality_df$Mean_All <- round(rowMeans(quality_matrix, na.rm = TRUE), 2)
+  quality_df$SD_All <- round(apply(quality_matrix, 1, sd, na.rm = TRUE), 2)
 
-  # Write to CSV
+  # Companion table: number of reads contributing to each cycle's mean, per sample
+  n_reads_df <- as.data.frame(n_reads_list)
+  n_reads_df$Cycle <- seq_len(nrow(n_reads_df))
+  n_reads_df <- n_reads_df[, c("Cycle", setdiff(names(n_reads_df), "Cycle"))]
+
+  n_reads_csv <- sub("\\.csv$", "_n_reads.csv", output_csv)
+  write.csv(n_reads_df, n_reads_csv, row.names = FALSE)
+  cat("Saved per-position read counts to:", n_reads_csv, "\n")
+
+  # Write quality summary
   write.csv(quality_df, output_csv, row.names = FALSE)
   cat("Saved combined quality summary to:", output_csv, "\n")
-  
+
   return(quality_df)
 }
 

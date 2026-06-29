@@ -76,11 +76,21 @@ fnRs <- sort(list.files(config$data_path,
 sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
 
 print(fnFs)
-# Plot quality profiles
-p1 <- plotQualityProfile(fnFs[1:4])
-ggsave(file.path(config$figure_output_dir, "forward_read_quality.png"), p1)
-p2 <- plotQualityProfile(fnRs[1:4])
-ggsave(file.path(config$figure_output_dir, "reverse_read_quality.png"), p2)
+# Plot quality profiles: one page per sample, F and R side-by-side
+qual_pdf <- file.path(config$figure_output_dir, "quality_profiles_per_sample.pdf")
+pdf(qual_pdf, width = 10, height = 5)
+
+for (i in seq_along(sample.names)) {
+  pF <- plotQualityProfile(fnFs[i]) +
+    ggtitle(paste(sample.names[i], "- Forward"))
+  pR <- plotQualityProfile(fnRs[i]) +
+    ggtitle(paste(sample.names[i], "- Reverse"))
+
+  print(ggarrange(pF, pR, ncol = 2))
+}
+
+dev.off()
+cat("Saved per-sample quality profiles to:", qual_pdf, "\n")
 
 # text summary of quality scores by bp
 fastq_files <- c(fnFs, fnRs)
