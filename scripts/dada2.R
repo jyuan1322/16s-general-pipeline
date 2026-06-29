@@ -193,8 +193,22 @@ write.table(track,
 # Save sequence table
 saveRDS(seqtab.nochim,
         file=file.path(config$data_output_dir, "seqtab_final.rds"))
-write.table(seqtab.nochim,
-        file=file.path(config$data_output_dir, "seqtab_final.tsv"))
+# write.table(seqtab.nochim,
+#         file=file.path(config$data_output_dir, "seqtab_final.tsv"))
+# Replace long sequences with short ASV IDs before writing
+# (you already load taxa for assignTaxonomy downstream, so do this after that step)
+asv_result <- assign_asv_ids(seqtab.nochim, taxa, tax_col = "label")
+
+# Write count table with short IDs as column names
+write.table(asv_result$seqtab,
+            file = file.path(config$data_output_dir, "seqtab_final.tsv"),
+            sep = "\t", quote = FALSE, row.names = TRUE, col.names = NA)
+
+# Write the ID -> sequence -> taxonomy mapping separately
+write.table(asv_result$mapping,
+            file = file.path(config$data_output_dir, "asv_mapping.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
 
 cat("Processing complete! Output files have been saved to:",
     config$data_output_dir, "and", config$figure_output_dir, "\n")

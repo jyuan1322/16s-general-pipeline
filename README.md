@@ -19,15 +19,25 @@ Settings are split into two files so the same scripts can be reused across studi
 
 ## Installation
 
+Create and load micromamba environment for running R:
 ```
 micromamba create -n r-microbiome -f environment.yml
 micromamba activate r-microbiome
 ```
 
+Inside R, install additional packages through BiocManager:
+```r
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+}
+BiocManager::install(c("dada2", "phyloseq", "ComplexHeatmap"))
+```
+
+
 ### Setup
 
-1. Copy `config_template.ini` → `config.ini` (or `config_<study>.ini`) and fill in real paths.
-2. Copy `study_params_template.R` → `study_params_<study>.R` and fill in your study's sample order, treatment groups, comparisons, and colors.
+1. Copy `config_template.ini` to `config.ini` (or `config_<study>.ini`) and fill in real paths.
+2. Copy `study_params_template.R` to `study_params_<study>.R` and fill in your study's sample order, treatment groups, comparisons, and colors.
 3. Point to your study params file from the `study_params` field in your config.
 4. Keep filled-in config and study params files out of version control if they contain sensitive or machine-specific paths (add them to `.gitignore`); only the templates need to be tracked.
 
