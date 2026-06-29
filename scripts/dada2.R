@@ -75,6 +75,31 @@ fnRs <- sort(list.files(config$data_path,
                        full.names = TRUE))
 sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
 
+# Optional restriction to a user-specified subset of samples.
+# sample_list is comma-separated sample names (matching the basename prefix
+# extracted above), without the pattern_forward/pattern_reverse suffix.
+# If unset or blank, all discovered samples are processed (existing behavior).
+if (!is.null(config$sample_list) && trimws(config$sample_list) != "") {
+  requested_samples <- trimws(strsplit(config$sample_list, ",")[[1]])
+
+  missing_samples <- requested_samples[!requested_samples %in% sample.names]
+  if (length(missing_samples) > 0) {
+    stop("sample_list contains sample(s) not found in data_path: ",
+         paste(missing_samples, collapse = ", "))
+  }
+
+  keep <- sample.names %in% requested_samples
+  fnFs <- fnFs[keep]
+  fnRs <- fnRs[keep]
+  sample.names <- sample.names[keep]
+
+  cat("Restricting to", length(sample.names), "sample(s) from sample_list:",
+      paste(sample.names, collapse = ", "), "\n")
+} else {
+  cat("No sample_list specified; processing all", length(sample.names),
+      "discovered sample(s)\n")
+}
+
 print(fnFs)
 # Plot quality profiles: one page per sample, F and R side-by-side
 qual_pdf <- file.path(config$figure_output_dir, "quality_profiles_per_sample.pdf")
@@ -127,46 +152,91 @@ plotErrors(errF, nominalQ=TRUE)
 plotErrors(errR, nominalQ=TRUE)
 dev.off()
 
-# Denoise + merge, streamed one sample at a time.
-# This keeps memory flat regardless of sample count: each iteration loads only
-# that sample's dereplicated reads, runs dada() on it, merges, then discards
-# the heavy intermediate objects (derep + dada-class) before moving on.
-# This produces identical results to passing all samples to derepFastq/dada at
-# once, since dada()'s default pool=FALSE already processes samples
-# independently -- the loop changes memory footprint, not the algorithm.
-print("Denoising and merging (streamed per-sample)")
+# Run dada() either per-sample ("big_data" to limit memory usage), or pooled,
+# allowing for error estimation jointly across samples.
+if (is.null(config$dada2_mode) || config$dada2_mode == "") {
+  config$dada2_mode <- "big_data"
+}
+if (!config$dada2_mode %in% c("big_data", "pooled")) {
+  stop("Invalid dada2_mode: '", config$dada2_mode,
+       "'. Must be 'big_data' or 'pooled'.")
+}
+cat("Running in dada2_mode:", config$dada2_mode, "\n")
 
 mergers <- vector("list", length(sample.names))
 names(mergers) <- sample.names
-
 denoisedF_n <- numeric(length(sample.names))
 denoisedR_n <- numeric(length(sample.names))
 names(denoisedF_n) <- sample.names
 names(denoisedR_n) <- sample.names
 
-for (sam in sample.names) {
-  cat("Processing sample:", sam, "\n")
+if (config$dada2_mode == "big_data") {
 
-  derepF <- derepFastq(filtFs[[sam]])
-  ddF <- dada(derepF, err=errF, multithread=TRUE)
-  denoisedF_n[sam] <- sum(getUniques(ddF))
+  # Streamed per-sample processing. Keeps memory flat regardless of sample
+  # count: each iteration loads only that sample's dereplicated reads, runs
+  # dada() on it, merges, then discards the heavy intermediate objects
+  # (derep + dada-class) before moving on. Equivalent to dada()'s default
+  # pool=FALSE, since samples are processed independently either way -- the
+  # loop only changes memory footprint, not the underlying algorithm.
+  print("Denoising and merging (streamed per-sample, big_data mode)")
 
-  derepR <- derepFastq(filtRs[[sam]])
-  ddR <- dada(derepR, err=errR, multithread=TRUE)
-  denoisedR_n[sam] <- sum(getUniques(ddR))
+  for (sam in sample.names) {
+    cat("Processing sample:", sam, "\n")
 
-  mergers[[sam]] <- mergePairs(ddF, derepF, ddR, derepR, verbose=TRUE)
+    derepF <- derepFastq(filtFs[[sam]])
+    ddF <- dada(derepF, err=errF, multithread=TRUE)
+    denoisedF_n[sam] <- sum(getUniques(ddF))
 
-  rm(derepF, derepR, ddF, ddR)
+    derepR <- derepFastq(filtRs[[sam]])
+    ddR <- dada(derepR, err=errR, multithread=TRUE)
+    denoisedR_n[sam] <- sum(getUniques(ddR))
+
+    mergers[[sam]] <- mergePairs(ddF, derepF, ddR, derepR, verbose=TRUE)
+
+    rm(derepF, derepR, ddF, ddR)
+  }
+
+} else if (config$dada2_mode == "pooled") {
+
+  # Pooled processing. pool=TRUE has dada() estimate the error/abundance
+  # model using information shared across all samples jointly, rather than
+  # independently per-sample. This trades memory for statistical power:
+  # rare variants that are subthreshold in any single sample but recurrent
+  # across samples become detectable, at the cost of requiring all samples'
+  # dereplicated reads in memory simultaneously.
+  print("Dereplicating reads (pooled mode)")
+  derepFs <- derepFastq(filtFs)
+  derepRs <- derepFastq(filtRs)
+  names(derepFs) <- sample.names
+  names(derepRs) <- sample.names
+
+  print("Denoising (pooled)")
+  dadaFs <- dada(derepFs, err=errF, multithread=TRUE, pool=TRUE)
+  dadaRs <- dada(derepRs, err=errR, multithread=TRUE, pool=TRUE)
+
+  print("Merging pairs (pooled)")
+  mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+
+  denoisedF_n <- sapply(dadaFs, function(x) sum(getUniques(x)))
+  denoisedR_n <- sapply(dadaRs, function(x) sum(getUniques(x)))
+  names(denoisedF_n) <- sample.names
+  names(denoisedR_n) <- sample.names
+
+  rm(derepFs, derepRs, dadaFs, dadaRs)
 }
 
-# Make sequence table and remove chimeras
-# method="consensus" checks each sample independently then takes a majority
-# vote across samples -- this scales better than "pooled" (which pools
-# abundances across all samples before checking) and is less sensitive to any
-# single noisy/high-chimera sample skewing the result.
 seqtab <- makeSequenceTable(mergers)
-seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+
+# Chimera removal method follows dada2_mode for consistency: pooled denoising
+# pairs with pooled chimera detection (abundances pooled across samples
+# before checking), while big_data/streamed denoising pairs with consensus
+# chimera detection (each sample checked independently, then majority vote
+# across samples) -- consensus is more conservative and less sensitive to
+# any single noisy/high-chimera sample skewing the result, matching the
+# per-sample independence assumption used in big_data mode.
+bimera_method <- if (config$dada2_mode == "pooled") "pooled" else "consensus"
+cat("Using removeBimeraDenovo method:", bimera_method, "\n")
+seqtab.nochim <- removeBimeraDenovo(seqtab, method=bimera_method, multithread=TRUE, verbose=TRUE)
 
 # Calculate chimera removal statistics
 chimera_stats <- sum(seqtab.nochim)/sum(seqtab)
@@ -195,8 +265,15 @@ saveRDS(seqtab.nochim,
         file=file.path(config$data_output_dir, "seqtab_final.rds"))
 # write.table(seqtab.nochim,
 #         file=file.path(config$data_output_dir, "seqtab_final.tsv"))
-# Replace long sequences with short ASV IDs before writing
-# (you already load taxa for assignTaxonomy downstream, so do this after that step)
+
+# Assign taxonomy
+print("Assigning taxonomy")
+taxa <- assignTaxonomy(seqtab.nochim, config$taxonomy_db, multithread=TRUE)
+taxa <- addSpecies(taxa, config$taxonomy_db_species)
+taxa <- data.frame(taxa)
+taxa$label <- paste(taxa$Family, taxa$Genus, taxa$Species, sep = "_")
+write.table(taxa, file = paste0(config$data_output_dir, "/taxa.csv"))
+
 asv_result <- assign_asv_ids(seqtab.nochim, taxa, tax_col = "label")
 
 # Write count table with short IDs as column names
@@ -213,14 +290,6 @@ write.table(asv_result$mapping,
 cat("Processing complete! Output files have been saved to:",
     config$data_output_dir, "and", config$figure_output_dir, "\n")
 
-
-# Assign taxonomy
-print("Assigning taxonomy")
-taxa <- assignTaxonomy(seqtab.nochim, config$taxonomy_db, multithread=TRUE)
-taxa <- addSpecies(taxa, config$taxonomy_db_species)
-taxa <- data.frame(taxa)
-taxa$label <- paste(taxa$Family, taxa$Genus, taxa$Species, sep = "_")
-write.table(taxa, file = paste0(config$data_output_dir, "/taxa.csv"))
 
 # evaluate taxa assignment rate
 rate_table <- classification_rate_table(seqtab.nochim, taxa)
